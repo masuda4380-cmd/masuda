@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>増田清高のブラウザ将棋（強化版）</title>
+<style>
+body{margin:0;padding:1rem;background:#faf8f1;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;}
+#container{display:flex;gap:1.5rem;flex-wrap:wrap;}
+h1{margin:0 0 1rem;font-size:1.8rem;text-align:center;}
+#board{display:grid;grid-template-columns:repeat(9,44px);grid-auto-rows:44px;gap:1px;background:#b8860b;padding:1px;user-select:none;}
+.cell{width:44px;height:44px;background:#f6e27a;display:flex;align-items:center;justify-content:center;font-size:22px;cursor:pointer;}
+.cell.sel{background:#ffe066;}
+.hand-box{min-width:170px;}
+.hand{display:flex;flex-wrap:wrap;gap:4px;min-height:48px;padding:4px;background:#fffbe6;border:1px solid #d4c59a;}
+.piece{padding:2px 4px;border:1px solid #666;border-radius:3px;background:#fff;font-size:20px;user-select:none;}
+.piece.w{transform:rotate(180deg);color:#d00;}
+.piece.b{color:#000;}
+.piece.sel{outline:3px solid #ffe066;}
+#msg{white-space:pre-wrap;color:#d00;margin-top:0.5rem;min-height:1.6rem;}
+</style>
+</head>
+<body>
+<h1>増田清高のブラウザ将棋 ― 強化AI版</h1>
+<div id="container">
+  <div>
+    <div id="board"></div>
+    <button id="resetBtn" style="margin-top:8px;padding:6px 16px;font-size:14px;">リセット</button>
+  </div>
+  <div class="hand-box">
+    <strong>あなたの持ち駒</strong>
+    <div id="playerHand" class="hand"></div>
+    <strong style="margin-top:8px;display:block;">AI の持ち駒</strong>
+    <div id="aiHand" class="hand"></div>
+    <div id="msg"></div>
+  </div>
+</div>
+
+<!-- BGM & 効果音（省略可：リンク切れの場合は任意MP3に差替え） -->
+<audio id="bgm"      src="https://assets.mixkit.co/music/preview/mixkit-lake-at-dawn-1107.mp3" preload="auto" loop></audio>
+<audio id="seMove"    src="https://assets.mixkit.co/sfx/preview/mixkit-game-click-1114.mp3" preload="auto"></audio>
+<audio id="seCapture" src="https://assets.mixkit.co/sfx/preview/mixkit-arcade-mechanical-bling-210.mp3" preload="auto"></audio>
+<audio id="seWin"     src="https://assets.mixkit.co/sfx/preview/mixkit-achievement-bell-600.mp3" preload="auto"></audio>
+<audio id="seLose"    src="https://assets.mixkit.co/sfx/preview/mixkit-player-losing-or-failing-2042.mp3" preload="auto"></audio>
+<audio id="seOute"    src="" preload="auto"></audio>
+
+<script>
+// ========= 定数 =========
+const SEARCH_TIME_MS = 6000; // 1手あたり最大思考 6秒
+const MAX_DEPTH       = 10;  // 最大読み深さ 10
+const KANJI = {p:"歩",l:"香",n:"桂",s:"銀",g:"金",k:"玉",b:"角",r:"飛","+p":"と","+l":"成香","+n":"成桂","+s":"成銀","+b":"馬","+r":"龍"};
+const VALUE = {k:1e4,r:900,b:750,g:600,s:500,n:350,l:300,p:100,
+              "+p":500,"+l":500,"+n":500,"+s":500,"+b":800,"+r":1000};
+
+// --- 位置評価テーブル（例：歩と金を詳細化。その他は簡易） ---
+const P_P = [
+  [ 0, 0, 0, 0,  0, 0, 0, 0, 0],
+  [ 5, 5, 5, 5,  5, 5, 5, 5, 5],
+  [ 4, 4, 4, 4,  4, 4, 4, 4, 4],
+  [ 3, 3, 3, 3,  3, 3, 3, 3, 3],
+  [ 2, 2, 2, 2,  2, 2, 2, 2, 2],
+  [ 1, 1, 1, 1,  1, 1, 1, 1, 1],
+  [ 0, 0, 0, 0,  0, 0, 0, 0, 0],
+  [-1,-1,-1,-1, -1,-1,-1,-1,-1],
+  [-2,-2,-2,-2, -2,-2,-2,-2,-2]
+];
+const P_G = [
+  [ -2,-1,-1,-1,-1,-1,-1,-1,-2],
+  [ -1, 0, 0, 0, 0, 0, 0, 0,-1],
+  [ -1, 0, 1, 1, 1, 1, 1, 0,-1],
+  [ -1, 0, 1, 2, 2, 2, 1, 0,-1],
+  [ -1, 0, 1, 2, 3, 2, 1, 0,-1],
+  [ -1, 0, 1, 2, 2, 2, 1, 0,-1],
+  [ -1, 0, 1, 1, 1, 1, 1, 0,-1],
+  [ -1, 0, 0, 0, 0, 0, 0, 0,-1],
+  [ -2,-1,-1,-1,-1,-1,-1,-1,-2]
+];
+// 他駒は 0 テーブル
+const ZERO = Array.from({length:9},()=>Array(9).fill(0));
+const PIECE_SQ = {
+  p:P_P, "+p":P_P, l:ZERO,"+l":ZERO,n:ZERO,"+n":ZERO,s:ZERO,"+s":ZERO,
+  g:P_G, k:ZERO, b:ZERO, "+b":ZERO, r:ZERO, "+r":ZERO
+};
+// --- その他 ---
+const PROMOTABLE = ["p","l","n","s","b","r"];
+const START_BOARD = [
+  ["l","n","s","g","k","g","s","n","l"],
+  ["","r","","","","","","b",""],
+  ["p","p","p","p","p","p","p","p","p"],
+  ["","","","","","","","",""],
+  ["","","","","","","","",""],
+  ["","","","","","","","",""],
+  ["P","P","P","P","P","P","P","P","P"],
+  ["","B","","","","","","R",""],
+  ["L","N","S","G","K","G","S","N","L"]
+];
+
+// ========= 変数 =========
+let board, hands, selected=null, selectedHand=null, gameOver=false, bgmStarted=false;
+const $=id=>document.getElementById(id);
+
+// ========= 効果音 =========
+const audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+function beep(f=440,d=0.12){const o=audioCtx.createOscillator(),g=audioCtx.createGain();o.frequency.value=f;o.type='square';g.gain.value=0.15;o.connect(g).connect(audioCtx.destination);o.start();o.stop(audioCtx.currentTime+d);}
+const se={bgm:$("bgm"),move:$("seMove"),cap:$("seCapture"),win:$("seWin"),lose:$("seLose"),oute:$("seOute")};
+function play(el,f){if(!el){beep(f);return;}el.currentTime=0;const p=el.play();if(p&&p.catch)p.catch(()=>beep(f));}
+function startBGM(){if(!bgmStarted){bgmStarted=true;play(se.bgm,220);}}
+
+// ========= 描画 =========
+function buildBoard(){const b=$("board");b.innerHTML='';for(let y=0;y<9;y++)for(let x=0;x<9;x++){const d=document.createElement('div');d.className='cell';d.dataset.x=x;d.dataset.y=y;d.onclick=onCell;b.appendChild(d);}}
+const strip=p=>p.replace('+','');
+const isBlack=p=>p===p.toUpperCase();
+const owner=p=>isBlack(p)?'b':'w';
+const promote=p=>p.startsWith('+')?p:'+'+p;
+function kanji(p){return KANJI[(p.startsWith('+')?'+':'')+strip(p).toLowerCase()]||'?';}
+function pieceTag(p){const s=document.createElement('span');s.className='piece '+(isBlack(p)?'b':'w');s.textContent=kanji(p);return s;}
+function hasPawn(o,file){for(let y=0;y<9;y++){const p=board[y][file];if(p&&owner(p)===o&&strip(p).toLowerCase()==='p'&&!p.startsWith('+'))return true;}return false;}
+function maybePromote(o,p,fy,ty){const base=strip(p).toLowerCase();if(!PROMOTABLE.includes(base)||p.startsWith('+'))return p;const zone=o==='b'?[0,1,2]:[6,7,8];return zone.includes(fy)||zone.includes(ty)?promote(p):p;}
+function clearPath(fx,fy,tx,ty){let x=fx+Math.sign(tx-fx),y=fy+Math.sign(ty-fy);while(x!==tx||y!==ty){if(board[y][x])return false;x+=Math.sign(tx-fx);y+=Math.sign(ty-fy);}return true;}
+function render(){
+  const cells=$("board").children;
+  for(const c of cells){const x=+c.dataset.x,y=+c.dataset.y,p=board[y][x];c.textContent='';c.classList.toggle('sel',selected&&selected.x===x&&selected.y===y);if(p)c.appendChild(pieceTag(p));}
+  const ph=$("playerHand"),ah=$("aiHand");ph.innerHTML='';ah.innerHTML='';
+  hands.b.forEach((p,i)=>{const t=pieceTag(p);if(selectedHand===i)t.classList.add('sel');t.onclick=()=>{selectedHand=i;selected=null;$("msg").textContent='打つ位置を選択';render();};ph.appendChild(t);});
+  hands.w.forEach(p=>ah.appendChild(pieceTag(p)));
+}
+function announceYourTurn(){$("msg").textContent="あなたの番です";}
+
+// ========= 指し手判定 =========
+function legal(o,fx,fy,tx,ty){
+  const p=board[fy][fx]; if(!p||owner(p)!==o) return false;
+  if(board[ty][tx] && owner(board[ty][tx])===o) return false;
+  const dx=tx-fx, dy=ty-fy, adx=Math.abs(dx), ady=Math.abs(dy), dir=o==='b'?-1:1;
+  const t=strip(p).toLowerCase(), pro=p.startsWith('+');
+  const gold=(pro&&['p','l','n','s'].includes(t))||t==='g';
+  if(gold){if(dy===dir&&adx<=1) return true;if(dy===0&&adx===1) return true;if(dy===-dir&&dx===0) return true;return false;}
+  if(pro&&t==='b'){if(adx===ady&&clearPath(fx,fy,tx,ty)) return true;if(adx+ady===1) return true;return false;}
+  if(pro&&t==='r'){if((dx===0||dy===0)&&clearPath(fx,fy,tx,ty)) return true;if(adx===1&&ady===1) return true;return false;}
+  if(t==='p') return dy===dir&&dx===0;
+  if(t==='l') return dy*dir>0&&dx===0&&clearPath(fx,fy,tx,ty);
+  if(t==='n') return dy===2*dir&&adx===1;
+  if(t==='s') return (dy===dir&&adx<=1)||(dy===-dir&&adx===1);
+  if(t==='b') return adx===ady&&clearPath(fx,fy,tx,ty);
+  if(t==='r') return (dx===0||dy===0)&&clearPath(fx,fy,tx,ty);
+  if(t==='k') return adx<=1&&ady<=1;
+  return false;
+}
+
+// ========= クリック =========
+function onCell(){
+  if(gameOver) return;
+  const x=+this.dataset.x, y=+this.dataset.y, p=board[y][x];
+  // 打ち駒
+  if(selectedHand!=null){
+    const hand=hands.b[selectedHand];
+    if(p){$("msg").textContent='既に駒があります';return;}
+    if(hand.toLowerCase()==='p'){
+      if(y===0){$("msg").textContent='歩は最終段に打てません';return;}
+      if(hasPawn('b',x)){ $("msg").textContent='二歩は禁じ手です';return; }
+    }
+    board[y][x]=hand; hands.b.splice(selectedHand,1); selectedHand=null;
+    $("msg").textContent=''; seMove(false); render();
+    if(afterMove('b')) return; setTimeout(aiTurn,100); return;
+  }
+  // 自駒選択
+  if(!selected){
+    if(p && isBlack(p)){ selected={x,y}; $("msg").textContent='移動先をクリック'; render(); }
+    return;
+  }
+  // 同マス→選択解除
+  if(selected.x===x && selected.y===y){ selected=null; $("msg").textContent=''; render(); return; }
+  // 移動
+  if(legal('b',selected.x,selected.y,x,y)){
+    const cap=board[y][x]; movePiece(selected.x,selected.y,x,y,'b'); seMove(!!cap);
+    selected=null; render(); if(afterMove('b')) return; setTimeout(aiTurn,100);
+  } else { $("msg").textContent='その手は指せません'; }
+}
+
+// ========= 駒移動 =========
+function movePiece(fx,fy,tx,ty,o){
+  const moving=board[fy][fx], capt=board[ty][tx];
+  board[ty][tx]=maybePromote(o,moving,fy,ty); board[fy][fx]='';
+  if(capt){ const base=strip(capt); hands[o].push(o==='b'?base.toUpperCase():base.toLowerCase()); }
+}
+
+// ========= 王手・勝敗 =========
+function findKing(o){const target=o==='b'?'K':'k';for(let y=0;y<9;y++)for(let x=0;x<9;x++)if(board[y][x]===target)return true;return false;}
+function isInCheck(player){
+  const kingChar=player==='b'?'K':'k'; let kx=null,ky=null;
+  for(let y=0;y<9&&kx===null;y++)for(let x=0;x<9;x++)if(board[y][x]===kingChar){kx=x;ky=y;break;}
+  if(kx===null) return false;
+  const attacker=player==='b'?'w':'b'; const moves=generateMoves(attacker,true); // true=王手判定専用
+  return moves.some(mv=>mv.tx===kx&&mv.ty===ky);
+}
+function afterMove(o){
+  const opp=o==='b'?'w':'b';
+  if(!findKing(opp)){seFinish(o==='b');$("msg").textContent=o==='b'?'あなたの勝ち！':'AIの勝ち！';gameOver=true;return true;}
+  const oppMoves=generateMoves(opp); if(!oppMoves.length){seFinish(o==='b');$("msg").textContent=o==='b'?'あなたの勝ち！':'AIの勝ち！';gameOver=true;return true;}
+  if(isInCheck(opp)){seOuteSound();$("msg").textContent='王手！';} else {$("msg").textContent='';}
+  return false;
+}
+
+// ========= 全手生成 =========
+function generateMoves(o,forCheck=false){
+  const arr=[];
+  for(let y=0;y<9;y++)for(let x=0;x<9;x++){
+    const p=board[y][x]; if(!p||owner(p)!==o) continue;
+    for(let ty=0;ty<9;ty++)for(let tx=0;tx<9;tx++){
+      if(legal(o,x,y,tx,ty)){
+        arr.push({type:'move',fx:x,fy:y,tx,ty,capture:Boolean(board[ty][tx]),prom:maybePromote(o,p,y,ty)!==p});
+      }
+    }
+  }
+  if(!forCheck){
+    hands[o].forEach((p,i)=>{
+      for(let y=0;y<9;y++)for(let x=0;x<9;x++){
+        if(board[y][x]) continue;
+        if(p.toLowerCase()==='p'){
+          if((o==='b'&&y===0)||(o==='w'&&y===8)) continue;
+          if(hasPawn(o,x)) continue;
+        }
+        arr.push({type:'drop',tx:x,ty:y,idx:i,capture:false,prom:false});
+      }
+    });
+  }
+  return arr;
+}
+
+// ========= 評価関数 =========
+function evaluate(){
+  let s=0, myMoves=0, oppMoves=0;
+  for(let y=0;y<9;y++)for(let x=0;x<9;x++){
+    const p=board[y][x]; if(!p) continue;
+    const base=strip(p).toLowerCase(), v=VALUE[base];
+    const table=PIECE_SQ[base]||ZERO;
+    const pos=isBlack(p)?table[8-y][x]:-table[y][x]; // 後手側は反転
+    s+=isBlack(p)? (v+pos) : -(v+pos);
+  }
+  // 持ち駒は単純加算
+  hands.b.forEach(p=>s+=VALUE[strip(p).toLowerCase()]);
+  hands.w.forEach(p=>s-=VALUE[strip(p).toLowerCase()]);
+  // モビリティ
+  myMoves = generateMoves('b',true).length;
+  oppMoves= generateMoves('w',true).length;
+  s += (myMoves - oppMoves) * 10;
+  return s;
+}
+
+// ========= ムーブスコア（オーダリング） =========
+function moveSortKey(mv){
+  let score=0;
+  if(mv.capture) score+=500;            // 駒得を優先
+  if(mv.prom)    score+=300;            // 成り手を優先
+  if(mv.type==='drop') score+=50;       // 打ち駒
+  return -score;                        // 降順
+}
+
+// ========= AI 探索 =========
+function saveState(){return {b:board.map(r=>r.slice()),h:{b:hands.b.slice(),w:hands.w.slice()}};}
+function restoreState(s){board=s.b.map(r=>r.slice());hands={b:s.h.b.slice(),w:s.h.w.slice()};}
+function applyMove(m,o){
+  if(m.type==='move'){movePiece(m.fx,m.fy,m.tx,m.ty,o);}
+  else{const p=hands[o][m.idx];board[m.ty][m.tx]=p;hands[o].splice(m.idx,1);}
+}
+// αβ（オーダリング付き）
+function alphaBeta(o,depth,alpha,beta,start){
+  if(performance.now()-start>SEARCH_TIME_MS) return {timeout:true};
+  if(depth===0) return {score:evaluate()};
+  let moves=generateMoves(o);
+  moves.sort((a,b)=>moveSortKey(a)-moveSortKey(b)); // 優先度順
+  if(!moves.length) return {score:o==='w'?1e9:-1e9};
+  let best=null;
+  for(const mv of moves){
+    const snap=saveState(); applyMove(mv,o);
+    const res=alphaBeta(o==='w'?'b':'w',depth-1,alpha,beta,start);
+    restoreState(snap); if(res.timeout) return {timeout:true};
+    const val=res.score;
+    if(o==='w'){ if(val<beta){beta=val; best=mv;} }
+    else      { if(val>alpha){alpha=val; best=mv;} }
+    if(alpha>=beta) break;
+  }
+  return {score:o==='w'?beta:alpha, move:best};
+}
+function aiTurn(){
+  if(gameOver) return;
+  const start=performance.now(); let best=null, snap=saveState();
+  for(let d=1;d<=MAX_DEPTH;d++){
+    const res=alphaBeta('w',d,-1e9,1e9,start);
+    if(res.timeout) break; best=res.move;
+  }
+  restoreState(snap);
+  if(!best){seFinish(true);$("msg").textContent='あなたの勝ち！';return;}
+  applyMove(best,'w'); const captured=(best.type==='move' && snap.b[best.ty][best.tx]);
+  seMove(captured); render(); const ended=afterMove('w');
+  if(!ended && $("msg").textContent===''){announceYourTurn();}
+}
+
+// ========= 効果音ユーティリティ =========
+function seMove(capture){startBGM();play(se.move,660);if(capture)play(se.cap,880);}
+function seFinish(win){play(win?se.win:se.lose,330);}
+function seOuteSound(){startBGM();play(se.oute,700);}
+
+// ========= 初期化 =========
+function reset(){
+  board=START_BOARD.map(r=>r.slice());
+  hands={b:[],w:[]}; selected=selectedHand=null; gameOver=false; $("msg").textContent=''; render(); announceYourTurn();
+}
+window.addEventListener('pointerdown',()=>audioCtx.resume(),{once:true});
+buildBoard(); reset(); $("resetBtn").onclick=reset;
+console.log('Shogi 強化AI ready');
+</script>
+</body>
+</html>
